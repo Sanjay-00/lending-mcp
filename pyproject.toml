@@ -1,0 +1,41 @@
+[project]
+name = "lending-mcp"
+version = "0.1.0"
+description = "Ask an LLM anything about a bureau report, answered by a deterministic parser over MCP"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp==2.3.0",
+    # AutoCAM's runtime dependencies. AutoCAM itself is loaded from its own
+    # folder (see lending_mcp/config.py), not installed.
+    "pymupdf==1.24.11",
+    "openpyxl==3.1.5",
+    "pillow==10.4.0",
+    "pytesseract==0.3.13",
+    "numpy>=1.24",
+    # The other three engines, as editable installs from their sibling folders. Each repo
+    # ships a top level package named `engine`; its own pyproject maps it to a unique name
+    # (bsa_engine, itr_engine, gst_engine). Editable, because the engines find their own
+    # resources (GST's policy.yaml, ITR's label map) relative to their source files.
+    "bsa-engine[ocr]",
+    "itr-engine[ocr]",
+    "gst-engine",
+]
+
+[tool.uv.sources]
+bsa-engine = { path = "../Bank Statemnt Analyser", editable = true }
+itr-engine = { path = "../ITR Extractor", editable = true }
+gst-engine = { path = "../GST Analyser", editable = true }
+
+[project.scripts]
+lending-mcp = "lending_mcp.__main__:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
