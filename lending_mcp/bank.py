@@ -36,6 +36,16 @@ R_CHAIN = "gap between merged statements"
 R_NOT_COVERED = "transactions do not cover the stated period"
 R_UNRESOLVED = "rows whose debit or credit could not be decided"
 R_UNPLACED = "a continuity check could not be placed in time"
+R_BALANCE_ONLY = "rows read with a balance but no debit or credit"
+
+
+def balance_only_rows(doc: dict) -> List[dict]:
+    """Rows the engine marked OPENING after the first. A statement has at most one opening
+    row (a merge keeps only the earliest file's), and the engine marks any row with a single
+    amount OPENING: on a real statement whose amounts fell into the narration, 862
+    transactions lost their amount this way and no engine check noticed."""
+    openings = [t for t in doc.get("transactions") or [] if t.get("status") == "OPENING"]
+    return openings[1:]
 
 
 class QueryError(ValueError):
@@ -137,6 +147,12 @@ def _months(doc: dict, engine_complete: Dict[str, bool]) -> List[dict]:
             if when is None or k == when.strftime("%Y-%m"):
                 add(k, R_UNPLACED if when is None else R_UNRESOLVED, True)
 
+    for t in balance_only_rows(doc):
+        when = _iso(t.get("date"))
+        for k in keys:
+            if when is None or k == when.strftime("%Y-%m"):
+                add(k, R_BALANCE_ONLY, True)
+
     out = []
     for k in keys:
         m = doc["monthly"][k]
@@ -170,6 +186,11 @@ def limitations(doc: dict) -> List[str]:
     if s.get("unresolved_count"):
         out.append(f"{s['unresolved_count']} row(s) worth Rs.{float(s.get('unresolved_amount') or 0):,.2f} could "
                    "not be read as debit or credit; they are in neither total")
+    extra = balance_only_rows(doc)
+    if extra:
+        out.append(f"{len(extra)} row(s) carried only a balance: the engine read no debit or credit on them and "
+                   "treated them as opening balance lines, so their amounts are in neither total. Read the "
+                   "totals of their months with care")
     if not (doc.get("statement_check") or {}).get("period"):
         out.append(NO_PERIOD)
     not_complete = [m["month"] for m in doc.get("months", []) if m["status"] != "complete"]
@@ -208,7 +229,10 @@ def averages(doc: dict) -> Dict[str, Any]:
 
 
 def loaded(doc: dict, unmasked: bool = False) -> Dict[str, Any]:
-    """What load_bank_statement answers: enough to know the right statement was read."""
+    """What load_bank_statement answers: enough to know the right statement was read. A
+    reading still going on in the background is answered as it is."""
+    if doc.get("status") == "reading":
+        return doc
     s = doc.get("summary") or {}
     counts = s.get("counts") or {}
     rows = sum(v for k, v in counts.items() if k != "OPENING")

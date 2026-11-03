@@ -249,6 +249,30 @@ def envelope(report: dict, unmasked: bool) -> Dict[str, Any]:
     }
 
 
+def loaded(report: dict, unmasked: bool = False) -> Dict[str, Any]:
+    """What load_bureau_report answers. A reading still going on in the background is
+    answered as it is."""
+    if report.get("status") == "reading":
+        return report
+    parsed = report["parsed"]
+    accounts = parsed.get("accounts", [])
+    return {
+        **envelope(report, unmasked),
+        "source_file": report["source_file"],
+        "from_cache": report["from_cache"],
+        "workbook": report["workbook"],
+        "borrower": {
+            "name": parsed.get("name"),
+            "score": score(report),
+            "identity": identity(report, unmasked),
+        },
+        "accounts": {
+            "total": len(accounts),
+            "by_status": dict(Counter(a.get("status") for a in accounts)),
+        },
+    }
+
+
 def identity(report: dict, unmasked: bool) -> Dict[str, Any]:
     ident = report["parsed"].get("identity") or {}
     if unmasked:

@@ -222,3 +222,12 @@ def test_export_excel_end_to_end(env, monkeypatch):  # noqa: F811
     assert load_workbook(out["workbook"]).sheetnames == ["Bank", "GST"]
     assert "does not establish that they belong to the same borrower" in out["note"]
     assert empty.is_error and unknown.is_error and "bank-nope-00000000" in unknown.content[0].text
+
+
+def test_instructions_cover_every_document_type_and_slow_reads():
+    from lending_mcp.server import INSTRUCTIONS
+
+    for name in ("load_bureau_report", "load_bank_statement", "load_itr", "get_itr_financials",
+                 "load_gst_returns", "get_gst_summary", "export_excel"):
+        assert name in INSTRUCTIONS, name
+    assert '"reading"' in INSTRUCTIONS and "DSCR" in INSTRUCTIONS

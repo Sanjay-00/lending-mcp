@@ -107,7 +107,7 @@ claude mcp add lending-mcp -- uv run --directory C:/path/to/lending-mcp lending-
 
 ## Slow first reads
 
-A scanned ITR or GST return is read by OCR, and its first read can take a minute or two. The
+A scanned document (bureau report, bank statement, ITR or GST return) is read by OCR, and its first read can take a minute or two. The
 load tool then answers "still reading, ask again in a minute" instead of timing out, and the
 reading carries on. Every later load of the same files is instant.
 

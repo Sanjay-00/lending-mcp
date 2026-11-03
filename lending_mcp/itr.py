@@ -172,6 +172,9 @@ def loaded(doc: dict, unmasked: bool = False) -> Dict[str, Any]:
         "entity": next((c.get("entity") for c in cols if c.get("entity")), None),
         "years": [{
             "year": c.get("year"),
+            # An ITR-1 carries no P&L or balance sheet at all; the engine's warning says so.
+            "form": (c.get("identity") or {}).get("form"),
+            "warnings": c.get("warnings") or [],
             "statements_read": {"profit_and_loss": "pl" in sections_read(c.get("values") or {}),
                                 "balance_sheet": "bs" in sections_read(c.get("values") or {})},
             "statements": [{"kind": b.get("kind"), "status": b.get("status")} for b in c.get("blocks_used") or []],

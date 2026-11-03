@@ -600,3 +600,89 @@ def test_load_gst_no_return_found(env):
     no_returns["files"] = [f for f in no_returns["files"] if f["doc_type"] != "GSTR3B"]
     with pytest.raises(LoadError, match="No GSTR-3B return found in these files"):
         loader.load_gst(_bank_files(env, "bank.pdf"), load_settings(), engine=FakeGst(no_returns))
+
+
+# --- slow bureau and bank reads (batch run on real files, 2026-11-02) ----------------------
+# A scanned CRIF report took 89 and 150 seconds on its first read; a client gives up on a
+# tool call after about a minute, so every load goes through the background reading.
+
+
+def test_slow_bureau_answers_reading_then_the_result(env, monkeypatch):
+    monkeypatch.setattr(loader, "BACKGROUND_WAIT", 0.05)
+    release, calls = _threading.Event(), []
+
+    def parse(path):
+        calls.append(path)
+        release.wait(5)
+        return dict(RETAIL)
+
+    path = str(env["allowed"] / "report.pdf")
+    first = loader.load(path, load_settings(), parse=parse, make_workbook=FakeEngine.workbook)
+    assert first["status"] == "reading" and first["report_id"] == first["document_id"]
+    with pytest.raises(LoadError, match="still being read"):
+        loader.require(first["report_id"], load_settings(), kind="bureau")
+    assert loader.load(path, load_settings(), parse=parse, make_workbook=FakeEngine.workbook)["status"] == "reading"
+    release.set()
+    _finish(first["report_id"])
+    done = loader.load(path, load_settings(), parse=parse, make_workbook=FakeEngine.workbook)
+    assert done.get("status") is None and done["report_id"] == first["report_id"] and len(calls) == 1
+
+
+class SlowBank(FakeBank):
+    def __init__(self, error=None):
+        super().__init__(error)
+        self.release = _threading.Event()
+
+    def analyze(self, data, password):
+        self.release.wait(5)
+        return super().analyze(data, password)
+
+
+def test_slow_bank_answers_reading_then_the_result(env, monkeypatch):
+    monkeypatch.setattr(loader, "BACKGROUND_WAIT", 0.05)
+    files, engine = _bank_files(env, "jan.pdf"), SlowBank()
+    first = loader.load_bank(files, load_settings(), engine=engine)
+    assert first["status"] == "reading" and first["document_id"].startswith("bank-")
+    engine.release.set()
+    _finish(first["document_id"])
+    done = loader.load_bank(files, load_settings(), engine=engine)
+    assert done.get("status") is None and done["document_id"] == first["document_id"]
+    assert len(engine.calls) == 1
+
+
+def test_failed_background_read_is_reported_by_get_tools(env, monkeypatch):
+    monkeypatch.setattr(loader, "BACKGROUND_WAIT", 0.05)
+    files, engine = _bank_files(env, "jan.pdf"), SlowBank(ValueError("TEST TRADERS"))
+    first = loader.load_bank(files, load_settings(), engine=engine)
+    engine.release.set()
+    _finish(first["document_id"])
+    with pytest.raises(LoadError, match=r"could not read this statement \(ValueError\)"):
+        loader.require(first["document_id"], load_settings(), kind="bank")
+
+
+def test_load_answers_pass_a_reading_status_through():
+    from lending_mcp import bank, bureau
+
+    reading = {"status": "reading", "document_id": "x", "report_id": "x", "message": "m"}
+    assert bank.loaded(reading) == reading
+    assert bureau.loaded(reading) == reading
+
+
+class EmptyBank(FakeBank):
+    def analyze(self, data, password):
+        s = super().analyze(data, password)
+        s["transactions"] = s["transactions"][:1]  # the opening row only
+        return s
+
+
+def test_bank_statement_with_no_transactions_is_refused(env):
+    with pytest.raises(LoadError, match="No transactions could be read from this statement"):
+        loader.load_bank(_bank_files(env, "jan.pdf"), load_settings(), engine=EmptyBank())
+
+
+def test_no_gst_return_says_what_the_files_were(env):
+    r = _gst.report()
+    r["files"] = ([{"file_name": f"r1_{i}.pdf", "doc_type": "GSTR1", "status": "UNSUPPORTED_FORM"} for i in range(2)]
+                  + [{"file_name": "x.pdf", "doc_type": "UNKNOWN", "status": "SKIPPED_NOT_GST"}])
+    with pytest.raises(LoadError, match=r"Found: 2 GSTR1 file\(s\), not supported; 1 file\(s\) not a GST document"):
+        loader.load_gst(_bank_files(env, "3b.pdf"), load_settings(), engine=FakeGst(r))

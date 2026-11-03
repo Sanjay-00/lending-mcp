@@ -1,12 +1,11 @@
 """
-The MCP server: four tools over one parsed bureau report. Each tool only
-validates its arguments and calls lending_mcp.loader or lending_mcp.bureau;
-there is no logic here.
+The MCP server: twelve tools over bureau reports, bank statements, ITRs and GST returns,
+plus one combined Excel. Each tool only validates its arguments and calls the loader or a
+document module; there is no logic here.
 """
 
 from __future__ import annotations
 
-from collections import Counter
 from typing import Literal, Optional
 
 from mcp.server.mcpserver import MCPServer
@@ -29,6 +28,21 @@ Bank statement: start with load_bank_statement(paths). Use get_bank_summary for 
 figures, averages, balances, bounces and EMI debits, and find_bank_transactions for any
 question about a set of transactions (filters and totals in code). Bank credits are not
 income; say "credits". Averages cover complete months only.
+
+ITR: load_itr(paths), one PDF per financial year, then get_itr_financials for year by year
+P&L and balance sheet figures and ratios. A ratio is withheld, with the reason, when a
+statement it needs was not read. DSCR is never given; do not compute it.
+
+GST: load_gst_returns(paths) takes GSTR-3B files or a folder (other documents are skipped),
+then get_gst_summary for turnover, tax, ITC, filing delays and findings per GSTIN. Findings
+are attention signals, not conclusions.
+
+Excel: export_excel(document_ids) writes one workbook with one sheet per loaded document,
+in the order given. Give the user the workbook path it returns.
+
+Slow reads: a scanned document's first read can take minutes. A load tool then answers
+status "reading". Tell the user it is still being read, wait about a minute, and call the
+same load tool again with the same arguments; nothing is read twice.
 
 Do not add figures yourself: use the totals the tools return. A value of null is unknown,
 never zero; say so. A flag shown as "not provided by this report format" is unknown, never
@@ -54,25 +68,10 @@ def load_bureau_report(path: str) -> dict:
     path inside the allowed folders. Parses it once with AutoCAM (cached afterwards) and writes
     AutoCAM's CAM Excel workbook. Returns the report_id every other tool needs, the borrower,
     the score, account counts, whether the reading reconciles with the report's own totals,
-    the workbook path, and the limitations."""
+    the workbook path, and the limitations. A scanned report's first read can take minutes:
+    then the answer is status "reading"; wait a minute and call again with the same path."""
     settings = load_settings()
-    report = _call(loader.load, path, settings)
-    parsed = report["parsed"]
-    return {
-        **bureau.envelope(report, settings.unmasked),
-        "source_file": report["source_file"],
-        "from_cache": report["from_cache"],
-        "workbook": report["workbook"],
-        "borrower": {
-            "name": parsed.get("name"),
-            "score": bureau.score(report),
-            "identity": bureau.identity(report, settings.unmasked),
-        },
-        "accounts": {
-            "total": len(parsed.get("accounts", [])),
-            "by_status": dict(Counter(a.get("status") for a in parsed.get("accounts", []))),
-        },
-    }
+    return bureau.loaded(_call(loader.load, path, settings), settings.unmasked)
 
 
 @mcp.tool(annotations=_READ_ONLY)
@@ -149,7 +148,8 @@ def load_bank_statement(paths: list[str], password: Optional[str] = None) -> dic
     of the same account (merged in date order, overlaps counted once). Read once by Bank
     Statement Analyser and cached. password is for a protected PDF. Returns the document_id
     the other bank tools need, the bank, the masked account number, the dates covered, how
-    many rows reconcile, which months are complete, and the limitations."""
+    many rows reconcile, which months are complete, and the limitations. A scanned statement's
+    first read can take minutes: then the answer is status "reading"; call again in a minute."""
     settings = load_settings()
     doc = _call(loader.load_bank, paths, settings, password)
     return bank.loaded(doc, settings.unmasked)

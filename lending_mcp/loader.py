@@ -47,7 +47,7 @@ _AUTOCAM_PACKAGES = ["pymupdf", "openpyxl", "pytesseract", "pillow"]
 
 # Raised whenever the normalised shape this server stores changes, so old cache entries
 # are parsed afresh instead of being read in a shape the query code no longer expects.
-NORMALISE_VERSION = 1
+NORMALISE_VERSION = 2  # 2: balance-only bank rows make their month doubtful
 # Document kinds other than bureau; their ids start with the kind. A bureau id has no prefix.
 KINDS = ("bank", "itr", "gst")
 
@@ -261,6 +261,8 @@ def load(raw_path: str, settings: Settings, parse=None, make_workbook=None) -> d
 
     cached = get(report_id, settings)
     if cached is not None:
+        with _jobs_lock:
+            _jobs.pop(report_id, None)  # a background reading that has finished
         logger.info("Report %s loaded from cache", report_id)
         return {**cached, "from_cache": True}
 
@@ -269,32 +271,39 @@ def load(raw_path: str, settings: Settings, parse=None, make_workbook=None) -> d
         parse = parse or (lambda p: autocam_parser.parse(p, api_key=None))
         make_workbook = make_workbook or autocam_excel.generate_excel
 
-    logger.info("Parsing report %s", report_id)
-    try:
-        parsed = parse(str(path))
-    except Exception as exc:
-        # The exception type only: AutoCAM's messages can quote report text.
-        logger.warning("AutoCAM failed on report %s: %s", report_id, type(exc).__name__)
-        raise LoadError(f"AutoCAM could not read this report ({type(exc).__name__}).") from exc
+    def read() -> dict:
+        logger.info("Parsing report %s", report_id)
+        try:
+            parsed = parse(str(path))
+        except Exception as exc:
+            # The exception type only: AutoCAM's messages can quote report text.
+            logger.warning("AutoCAM failed on report %s: %s", report_id, type(exc).__name__)
+            raise LoadError(f"AutoCAM could not read this report ({type(exc).__name__}).") from exc
 
-    provider = parsed.get("provider")
-    if provider not in PROVIDER_NAMES:
-        raise LoadError(
-            f"This report was recognised as {provider!r}. Lending MCP v1 supports CRIF High Mark "
-            "retail and Commercial ACE reports only; TransUnion CIBIL is not supported yet."
-        )
+        provider = parsed.get("provider")
+        if provider not in PROVIDER_NAMES:
+            raise LoadError(
+                f"This report was recognised as {provider!r}. Lending MCP supports CRIF High Mark "
+                "retail and Commercial ACE reports only; TransUnion CIBIL is not supported yet."
+            )
 
-    workbook = settings.workbooks_dir / f"{report_id}.xlsx"
-    _atomic_write(workbook, make_workbook(parsed))
-    report = {
-        "report_id": report_id,
-        "source_file": path.name,
-        "loaded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "workbook": str(workbook),
-        "parsed": parsed,
-    }
-    store(report, settings)
-    return {**report, "from_cache": False}
+        workbook = settings.workbooks_dir / f"{report_id}.xlsx"
+        _atomic_write(workbook, make_workbook(parsed))
+        report = {
+            "report_id": report_id,
+            "source_file": path.name,
+            "loaded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "workbook": str(workbook),
+            "parsed": parsed,
+        }
+        store(report, settings)
+        return {**report, "from_cache": False}
+
+    # A scanned report's first read measured 89 and 150 seconds on real files.
+    result = in_background(report_id, read)
+    if result.get("status") == "reading":
+        result["report_id"] = report_id
+    return result
 
 
 def get(report_id: str, settings: Settings) -> Optional[dict]:
@@ -368,7 +377,14 @@ def require(report_id: str, settings: Settings, kind: Optional[str] = None) -> d
         article = "an" if actual == "itr" else "a"
         raise LoadError(f"{report_id!r} is {article} {actual} document, not {kind}.")
     report = get(report_id, settings)
-    if report is None and report_id in _jobs:
+    job = _jobs.get(report_id) if report is None else None
+    if job is not None and job["done"].is_set() and job["error"] is not None:
+        with _jobs_lock:
+            _jobs.pop(report_id, None)  # the next load call tries again
+        if isinstance(job["error"], LoadError):
+            raise job["error"]
+        raise LoadError(f"Reading {report_id!r} failed ({type(job['error']).__name__}).")
+    if job is not None:
         raise LoadError(f"{report_id!r} is still being read. Call {_LOAD_TOOL[actual]} again in a minute.")
     if report is None:
         what = "report" if actual == "bureau" else "document"
@@ -427,21 +443,29 @@ def _engine_month_complete(result: dict, engine) -> Dict[str, bool]:
 
 def load_bank(paths: List[str], settings: Settings, password: Optional[str] = None, engine=None) -> dict:
     """One statement, or several statements of the same account merged by the engine."""
-    from lending_mcp import bank
-
     files = checked_paths(paths, settings, {".pdf"})
     datas = [_read(f) for f in files]
     doc_id = document_id("bank", datas, fingerprint(engine_files("bsa_engine"), _BANK_PACKAGES))
 
     cached = get(doc_id, settings)
     if cached is not None:
+        with _jobs_lock:
+            _jobs.pop(doc_id, None)
         logger.info("Bank statement %s loaded from cache", doc_id)
         return {**cached, "from_cache": True}
 
+    engine = engine or BankEngine()
+    # A scanned statement is read by OCR and can take minutes.
+    return in_background(doc_id, lambda: _read_bank(doc_id, files, datas, password, settings, engine))
+
+
+def _read_bank(doc_id: str, files: List[Path], datas: List[bytes], password: Optional[str],
+               settings: Settings, engine) -> dict:
     from bsa_engine.multi_statement import MismatchedAccountError
     from bsa_engine.parser import LockedPDFError
 
-    engine = engine or BankEngine()
+    from lending_mcp import bank
+
     logger.info("Reading bank statement %s (%d file(s))", doc_id, len(datas))
     try:
         if len(datas) == 1:
@@ -462,6 +486,11 @@ def load_bank(paths: List[str], settings: Settings, password: Optional[str] = No
         raise LoadError(f"Bank Statement Analyser could not read this statement ({type(exc).__name__}).") from exc
 
     result = to_jsonable(raw)
+    if not any(t.get("status") != "OPENING" for t in result.get("transactions") or []):
+        # A real 34 page PDF read this way: no bank recognised, nothing read, and the
+        # load used to succeed with empty months.
+        raise LoadError("No transactions could be read from this statement. It may not be a bank statement, "
+                        "or its layout is not one Bank Statement Analyser reads.")
     doc = bank.normalise(result, emi, merge, _engine_month_complete(result, engine))
     doc.update({
         "document_id": doc_id,
@@ -589,6 +618,24 @@ class GstEngine:
         return analyse(paths).report
 
 
+def _gst_found(files: List[dict]) -> str:
+    """What the engine recognised instead, by kind: a folder of GSTR-1 returns read as "no
+    return found" on a real case, which told the user nothing."""
+    from collections import Counter
+
+    def what(f: dict) -> str:
+        if f.get("status") == "SKIPPED_NOT_GST":
+            return "file(s) not a GST document"
+        if f.get("status") == "UNSUPPORTED_FORM":
+            return f"{f.get('doc_type')} file(s), not supported"
+        return f"{f.get('doc_type')} file(s), {str(f.get('status')).lower()}"
+
+    parts = [f"{n} {k}" for k, n in Counter(what(f) for f in files).items()]
+    if not parts:
+        return "No files were read."
+    return "Found: " + "; ".join(parts) + ". Only GSTR-3B returns are read."
+
+
 def load_gst(paths: List[str], settings: Settings, engine=None) -> dict:
     """GSTR-3B returns, given as files or folders. Every file found in a folder must itself be
     inside the allowed folders. The engine recognises other documents and lists them as
@@ -618,7 +665,7 @@ def load_gst(paths: List[str], settings: Settings, engine=None) -> dict:
             logger.warning("GST Analyser failed on %s: %s", doc_id, type(exc).__name__)
             raise LoadError(f"GST Analyser could not read these files ({type(exc).__name__}).") from exc
         if not any(f.get("doc_type") == "GSTR3B" for f in report.get("files") or []):
-            raise LoadError("No GSTR-3B return found in these files.")
+            raise LoadError("No GSTR-3B return found in these files. " + _gst_found(report.get("files") or []))
         doc = gst.normalise(report)
         doc.update({
             "document_id": doc_id,

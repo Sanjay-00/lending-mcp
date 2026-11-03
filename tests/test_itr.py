@@ -1,3 +1,4 @@
+import copy
 import json
 
 from lending_mcp import itr
@@ -93,3 +94,11 @@ def test_pan_masked_and_unmasked():
 def test_loaded_passes_a_reading_status_through():
     pending = {"status": "reading", "document_id": "itr-abc-12345678", "message": "still reading"}
     assert itr.loaded(pending) == pending
+
+
+def test_load_answer_shows_each_years_form_and_engine_warnings():
+    from tests.fixtures_itr import COLUMNS
+
+    doc = {"columns": copy.deepcopy(COLUMNS), "document_id": "itr-x-1"}
+    years = itr.loaded(doc)["years"]
+    assert years[0]["form"] == "ITR-3" and years[1]["warnings"] == ["Profit and loss statement not read for this year."]

@@ -208,12 +208,12 @@ frozen) went through two rounds of ChatGPT review relayed by the user; the plan 
 | GSTINs become records with opaque `entity_id`s | Masking dict keys in place can collide |
 | Cache unmasked, masking per answer; cache key adds package versions, GST's policy file and `NORMALISE_VERSION` | Flipping masking must never serve a stale form; a new reader version must parse afresh |
 | One workbook, one sheet per document; CIBIL and ITR first sheets copied exactly, bank and GST sheets in their style | The user loves those two sheets; copying carries every future engine improvement |
-| Slow reads (ITR, GST) answer "still reading" after 40 s and finish in the background | Scanned ITR first reads measured 46 and 102 s on real files, past typical MCP client timeouts |
+| Slow reads (every load) answer "still reading" after 40 s and finish in the background | Scanned first reads measured 46 to 150 s on real files (ITR, CRIF, bank), past typical MCP client timeouts |
 | The three engines as editable uv path sources | Each ships a package named `engine`; FinSight installs them the same way |
 
 ### Verification done
 
-- `uv run pytest`: 197 tests (synthetic fixtures, in process MCP client, stdio subprocess).
+- `uv run pytest`: 207 tests (synthetic fixtures, in process MCP client, stdio subprocess).
 - A clean throwaway venv proved the four engines coexist (both import orders, resources found).
 - Real files, counts only: bank, 3 statements (one merged pair; a statement whose printed
   period ends early shows its last month partial); ITR, 3 bundles (2 scanned), ratios withheld
@@ -226,3 +226,37 @@ frozen) went through two rounds of ChatGPT review relayed by the user; the plan 
    (LibreOffice is not installed): open one export in Excel once to confirm.
 2. Scanned bank pages are not read (Vision is off); the answer says how many.
 3. Real Claude Desktop behaviour on a "still reading" answer is untested.
+
+## 11. Batch run on real files (2026-11-02)
+
+Counts only, never names. Bureau: 50 reports in `Downloads/CIBIL`: 42 loaded (30 reconcile
+with the printed totals, 12 do not: 7 scanned with OCR losses, 5 digital with count, sanction
+or balance gaps), 8 TransUnion refused, no crash. Bank: 30 statements in `Downloads/BS`, all
+loaded. Cases: 6 in `Downloads/CAM/FC` and 2 in `Downloads/Finsight`, every type.
+
+Fixed in the MCP, each with a test that failed first:
+
+1. Bureau and bank loads ran inline; scanned first reads took 80 to 150 s. All loads now go
+   through the background reading.
+2. A failed background read made the get tools say "still being read" forever; they now
+   raise the failure.
+3. A bank statement whose amounts fell into the narration had 862 transactions read as
+   "opening balance" rows (the engine marks any single amount row so), and the MCP published
+   averages without them. Every OPENING row after the first now makes its month doubtful and
+   is named in the limitations (`NORMALISE_VERSION` 2).
+4. A PDF with no transactions read loaded as an empty statement; it is now refused.
+5. A folder of GSTR-1 returns answered only "no GSTR-3B found"; the refusal now says what the
+   files were.
+6. `load_itr` now shows each year's form and the engine's warnings (an ITR-1 has no P&L or
+   balance sheet at all).
+7. The server instructions covered bureau and bank only; they now cover all twelve tools and
+   the "reading" status.
+
+Engine issues found (separate work, each engine's own repo):
+
+- Bank Statement Analyser: `statement_table._finalize` marks any row with one amount as an
+  opening row, and no check flags many of them; amounts in the narration column are lost.
+- AutoCAM: 5 digital CRIF reports do not reconcile with their printed totals; on 2 retail
+  reports AutoCAM doubts the DPD of most accounts (93 of 120, 91 of 115).
+- ITR Extractor: FY2023 balance sheet not read on two bundles (one scanned).
+- GST Analyser: GSTR-1 is not supported.

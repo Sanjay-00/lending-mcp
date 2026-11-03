@@ -246,3 +246,31 @@ def test_find_masks_account_number_in_narration():
     masked = find(narration_contains="own a/c")
     assert ACCOUNT not in json.dumps(masked)
     assert ACCOUNT in json.dumps(find(narration_contains="own a/c", unmasked=True))
+
+
+# --- balance-only rows (batch run on real files, 2026-11-02) ------------------------------
+# On one real statement the amount column landed in the narration, so 862 transactions kept
+# only their balance and the engine took each for an opening balance line. A statement has
+# at most one opening row; every further one is a transaction whose amount was not read.
+
+
+def _with_balance_only_rows(n, day="2025-02-05"):
+    s = copy.deepcopy(STATEMENT)
+    for i in range(n):
+        s["transactions"].insert(5, {**s["transactions"][0], "date": day, "narration": f"UPI/DR/{i}",
+                                     "balance": 30000.0 + i})
+    s["summary"]["counts"]["OPENING"] = 1 + n
+    return s
+
+
+def test_balance_only_rows_make_their_month_doubtful():
+    m = months(doc_of(_with_balance_only_rows(2)))
+    assert m["2025-01"]["status"] == "complete"  # the real opening row stays harmless
+    assert m["2025-02"]["status"] == "doubtful"
+    assert bank.R_BALANCE_ONLY in m["2025-02"]["reasons"]
+
+
+def test_balance_only_rows_are_a_limitation():
+    d = doc_of(_with_balance_only_rows(3))
+    assert any(l.startswith("3 row(s) carried only a balance") for l in bank.limitations(d))
+    assert not any("only a balance" in l for l in bank.limitations(doc_of()))

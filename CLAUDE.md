@@ -101,7 +101,7 @@ The tools are `load_bureau_report`, `get_bureau_summary`, `find_bureau_accounts`
 
 ```
 uv sync                 install (Python 3.12, mcp==2.3.0 pinned)
-uv run pytest           197 tests at the last run (2026-11-01)
+uv run pytest           207 tests at the last run (2026-11-02)
 uv run lending-mcp      start the server on stdio (normally the MCP client starts it)
 uv run python scripts/real_run.py bank|itr|gst <files>   local real file check, counts only
 ```
